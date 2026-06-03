@@ -2,7 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import math
 
-def opdr1():
+
+def opdr1():  
     Lc = 7e-6
     kBT_Lp = 0.0911e-12
 
