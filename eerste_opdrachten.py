@@ -44,7 +44,6 @@ def opdr1():
     plt.tight_layout()
     plt.show()
 
-
 def opdr2():
     Lc = 7e-6
     kBT_Lp = 0.0911e-12
