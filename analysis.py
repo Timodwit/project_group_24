@@ -1395,7 +1395,7 @@ def interactive_run():
     # Step 4: set output folder = experiment name, show traces for ALL beads
     # ------------------------------------------------------------------
     global PRACTICAL
-    PRACTICAL = Path("practical") / base.name
+    PRACTICAL = Path(__file__).parent.parent / "plots" / "practical" / base.name
     PRACTICAL.mkdir(parents=True, exist_ok=True)
     out_prefix = base.name          # just the last folder segment, e.g. '20260604_1602_exp1'
 
