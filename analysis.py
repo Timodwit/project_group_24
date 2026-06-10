@@ -15,6 +15,11 @@ from pathlib import Path
 
 plt.rcParams.update({'font.size': 10, 'figure.dpi': 120})
 
+PRACTICAL   = Path("practical")
+THEORETICAL = Path("theoretical")
+PRACTICAL.mkdir(exist_ok=True)
+THEORETICAL.mkdir(exist_ok=True)
+
 # ------------------------------------------------------------------------------
 # 0.  PHYSICAL CONSTANTS
 # ------------------------------------------------------------------------------
@@ -240,7 +245,7 @@ def part1_tracking_resolution(file_200gl: str, file_20gl: str):
 
         plt.suptitle(f'Reference bead traces — {label}', fontsize=11, y=1.01)
         plt.tight_layout()
-        out = f"tracking_{label.replace(' ', '_')}.pdf"
+        out = str(PRACTICAL / f"tracking_{label.replace(' ', '_')}.svg")
         plt.savefig(out, bbox_inches='tight')
         plt.show()
         print(f"  -> saved {out}")
@@ -258,16 +263,18 @@ SET_FORCES = [0.1, 0.2, 0.3, 0.4, 0.8, 1.0, 3.0, 5.0, 6.0]   # pN
 def _analyze_bead(df: pd.DataFrame,
                   bead_idx: int,
                   ref_idx: int,
-                  n_zero: int) -> dict:
+                  n_zero: int,
+                  t_fail_ms: float = None) -> dict:
     """
     Extract L_ext, variances, and all force estimates for one tethered bead.
 
     Parameters
     ----------
-    df        : DataFrame for one force-step file
-    bead_idx  : 1-based index of the tethered bead
-    ref_idx   : 1-based index of the reference bead (drift correction)
-    n_zero    : number of frames at zero force at the beginning
+    df         : DataFrame for one force-step file
+    bead_idx   : 1-based index of the tethered bead
+    ref_idx    : 1-based index of the reference bead (drift correction)
+    n_zero     : number of frames at zero force at the beginning
+    t_fail_ms  : discard data after this experiment time [ms] (None = keep all)
 
     Returns dict with L_ext, variances, four force estimates
     """
@@ -278,13 +285,26 @@ def _analyze_bead(df: pd.DataFrame,
     # L_ext from z: |median(z_force) − median(z_zero)|
     z_all   = df['dz'].values
     z_zero  = z_all[:n_zero]
-    z_force = z_all[n_zero:]
+    z_force = df['dz'].values[n_zero:]
+
+    # Apply DNA failure cutoff to force region
+    if t_fail_ms is not None:
+        t_force = df['time_ms'].values[n_zero:]
+        valid   = t_force <= t_fail_ms
+        z_force = z_force[valid]
+
     L_ext_nm = abs(np.median(z_force) - np.median(z_zero))
     L_ext_um = L_ext_nm / 1e3
 
     # Lateral variances in force region (sigma-clip spikes first)
     x_raw = df['dx'].values[n_zero:]
     y_raw = df['dy'].values[n_zero:]
+
+    if t_fail_ms is not None:
+        t_force = df['time_ms'].values[n_zero:]
+        valid   = t_force <= t_fail_ms
+        x_raw   = x_raw[valid]
+        y_raw   = y_raw[valid]
     x_c, _ = sigma_clip(x_raw)
     y_c, _ = sigma_clip(y_raw)
     var_x = pop_variance(x_c)   # nm²
@@ -308,7 +328,9 @@ def process_dataset(files_dict: dict,
                     ref_idx: int,
                     n_zero: int,
                     tau_sh_label: str,
-                    exclude_beads: list = None) -> pd.DataFrame:
+                    exclude_beads: list = None,
+                    fail_times: dict = None,
+                    out_prefix: str = '') -> pd.DataFrame:
     """
     Process a full tau_sh dataset (all force steps, all beads).
 
@@ -327,7 +349,9 @@ def process_dataset(files_dict: dict,
         df, _ = load_data(val)
 
         for b in tethered:
-            res = _analyze_bead(df.copy(), b, ref_idx, n_zero)
+            t_fail = (fail_times or {}).get(b)
+            t_fail_ms = t_fail * 1000.0 if t_fail is not None else None
+            res = _analyze_bead(df.copy(), b, ref_idx, n_zero, t_fail_ms)
 
             # -- Axis identification --------------------------------------
             # Lower Eq. 8 force  ←->  larger variance  ←->  axis // B
@@ -370,38 +394,290 @@ def process_dataset(files_dict: dict,
         rel = σ / μ * 100 if μ > 0 else 0
         print(f"  {F_set:>7.2f}  {μ:>8.3f}  {σ:>7.3f}  {rel:>6.1f}%  {len(grp)}")
 
-    return df_out
+    # Export per-bead variance table to Excel
+    _export_variances_excel(df_out, _excl, tau_sh_label, out_prefix)
+
+    return df_calc
+
+
+def _export_variances_excel(df_out, excl_beads, tau_sh_label, out_prefix):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    beads_sorted  = sorted(df_out['bead'].unique())
+    F_sets_sorted = sorted(df_out['F_set_pN'].unique())
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Variances'
+
+    # Styles
+    font_header  = Font(name='Arial', bold=True, size=10)
+    font_normal  = Font(name='Arial', size=10)
+    font_excl    = Font(name='Arial', size=10, italic=True, color='888888')
+    fill_header  = PatternFill('solid', start_color='2F4F8F', end_color='2F4F8F')
+    fill_excl    = PatternFill('solid', start_color='F0F0F0', end_color='F0F0F0')
+    fill_alt     = PatternFill('solid', start_color='EEF2FF', end_color='EEF2FF')
+    align_center = Alignment(horizontal='center', vertical='center')
+    align_right  = Alignment(horizontal='right',  vertical='center')
+    thin_side    = Side(style='thin', color='CCCCCC')
+    thin_border  = Border(left=thin_side, right=thin_side,
+                          top=thin_side, bottom=thin_side)
+
+    # Row 1: title
+    ws.merge_cells('A1:B1')
+    ws['A1'] = f'Variances per bead [nm²]  —  {tau_sh_label}'
+    ws['A1'].font = Font(name='Arial', bold=True, size=12, color='FFFFFF')
+    ws['A1'].fill = fill_header
+    ws['A1'].alignment = align_center
+    # extend title across all columns
+    n_cols = 2 + len(beads_sorted) * 2
+    for c in range(3, n_cols + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = fill_header
+
+    # Row 2: bead headers (merged pairs)
+    ws['A2'] = 'F_set [pN]'
+    ws['A2'].font = font_header
+    ws['A2'].fill = PatternFill('solid', start_color='4472C4', end_color='4472C4')
+    ws['A2'].font = Font(name='Arial', bold=True, size=10, color='FFFFFF')
+    ws['A2'].alignment = align_center
+    ws['B2'] = 'F_set [pN]'  # placeholder, will be hidden via merge
+    ws.merge_cells('A2:B2')
+
+    for i, b in enumerate(beads_sorted):
+        col_x = 3 + i * 2
+        col_y = col_x + 1
+        excl  = b in excl_beads
+        label = f'Bead {b}' + (' (excl.)' if excl else '')
+        cell  = ws.cell(row=2, column=col_x, value=label)
+        cell.font      = Font(name='Arial', bold=True, size=10,
+                              color='FFFFFF' if not excl else 'BBBBBB')
+        cell.fill      = PatternFill('solid',
+                                     start_color='4472C4' if not excl else '888888',
+                                     end_color  ='4472C4' if not excl else '888888')
+        cell.alignment = align_center
+        ws.merge_cells(start_row=2, start_column=col_x,
+                       end_row=2,   end_column=col_y)
+
+    # Row 3: x² / y² sub-headers
+    ws['A3'] = ''
+    for i, b in enumerate(beads_sorted):
+        col_x = 3 + i * 2
+        for j, lbl in enumerate(['⟨x²⟩', '⟨y²⟩']):
+            cell = ws.cell(row=3, column=col_x + j, value=lbl)
+            cell.font      = Font(name='Arial', bold=True, size=10)
+            cell.alignment = align_center
+            cell.border    = thin_border
+
+    ws['A3'].font      = Font(name='Arial', bold=True, size=10)
+    ws['A3'].alignment = align_center
+
+    # Data rows
+    for r_i, F_set in enumerate(F_sets_sorted):
+        row_num = 4 + r_i
+        fill_row = fill_alt if r_i % 2 == 0 else PatternFill()
+
+        cell_f = ws.cell(row=row_num, column=1, value=round(F_set, 3))
+        cell_f.font      = font_normal
+        cell_f.alignment = align_right
+        cell_f.fill      = fill_row
+        cell_f.border    = thin_border
+        ws.merge_cells(start_row=row_num, start_column=1,
+                       end_row=row_num,   end_column=2)
+
+        for i, b in enumerate(beads_sorted):
+            col_x  = 3 + i * 2
+            entry  = df_out[(df_out['F_set_pN'] == F_set) & (df_out['bead'] == b)]
+            excl   = b in excl_beads
+            f_cell = font_excl if excl else font_normal
+            f_bg   = fill_excl if excl else fill_row
+
+            for j, key in enumerate(['var_x_nm2', 'var_y_nm2']):
+                val  = round(entry[key].values[0], 1) if len(entry) else None
+                cell = ws.cell(row=row_num, column=col_x + j, value=val)
+                cell.font      = f_cell
+                cell.fill      = f_bg
+                cell.alignment = align_right
+                cell.border    = thin_border
+                if val is not None:
+                    cell.number_format = '#,##0.0'
+
+    # Column widths
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 0.5
+    for i in range(len(beads_sorted) * 2):
+        ws.column_dimensions[get_column_letter(3 + i)].width = 11
+
+    # Freeze panes below header rows
+    ws.freeze_panes = 'A4'
+
+    fname = str(PRACTICAL / f'{out_prefix}_variances.xlsx')
+    wb.save(fname)
+    print(f"  -> saved {fname}")
 
 
 # ------------------------------------------------------------------------------
 # 5.  PLOTS (Parts 2.1 – 2.3)
 # ------------------------------------------------------------------------------
 
-def plot_F_Lext(df: pd.DataFrame, tau_sh_label: str):
+def plot_F_Lext(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
     """F_par vs L_ext with WLC overlay  (per bead)."""
     fig, ax = plt.subplots(figsize=(7, 5))
 
     cmap = plt.get_cmap('tab20')
     for i, (b, grp) in enumerate(df.groupby('bead')):
-        ax.scatter(grp['L_ext_um'], grp['F_par_pN'],
-                   color=cmap(i), s=35, label=f'Bead {b}', zorder=3)
+        grp_s = grp.sort_values('F_set_pN')
+        ax.plot(grp_s['F_set_pN'], grp_s['L_ext_um'],
+                color=cmap(i), marker='o', ms=5, lw=1.2, alpha=0.8,
+                label=f'Bead {b}', zorder=3)
 
     F_wlc = np.logspace(-1.5, 0.9, 300)
     L_wlc = np.array([wlc_L_ext(f) for f in F_wlc])
-    ax.plot(L_wlc, F_wlc, 'k--', lw=1.8, label='WLC theory', zorder=4)
+    ax.plot(F_wlc, L_wlc, 'k--', lw=1.8, label='WLC theory', zorder=4)
 
-    ax.set_xlabel(r'$L_\mathrm{ext}$  [$\mu$m]')
-    ax.set_ylabel('Force  [pN]')
+    ax.set_xlabel('Expected force  [pN]')
+    ax.set_ylabel(r'$L_\mathrm{ext}$  [$\mu$m]')
     ax.set_title(f'Force vs extension — $\\tau_{{sh}}$ = {tau_sh_label}')
     ax.legend(fontsize=8)
     plt.tight_layout()
-    out = f"F_Lext_{tau_sh_label.replace(' ','_')}.pdf"
+    out = str(PRACTICAL / f"{out_prefix}_F_Lext_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
     print(f"  -> saved {out}")
 
 
-def plot_F_z_combined(dfs: dict):
+def plot_var_x_vs_F(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
+    """x-variance vs expected force (per bead)."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    cmap = plt.get_cmap('tab20')
+    for i, (b, grp) in enumerate(df.groupby('bead')):
+        grp_s = grp.sort_values('F_set_pN')
+        ax.plot(grp_s['F_set_pN'], grp_s['var_x_nm2'],
+                color=cmap(i), marker='o', ms=5, lw=1.2, alpha=0.8,
+                label=f'Bead {b}', zorder=3)
+    ax.set_xlabel('Expected force  [pN]')
+    ax.set_ylabel(r'$\langle x^2 \rangle$  [nm²]')
+    ax.set_yscale('log')
+    ax.set_title(f'x-variance vs force — $\\tau_{{sh}}$ = {tau_sh_label}')
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    out = str(PRACTICAL / f"{out_prefix}_var_x_{tau_sh_label.replace(' ','_')}.svg")
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f"  -> saved {out}")
+
+
+def plot_var_y_vs_F(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
+    """y-variance vs expected force (per bead)."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    cmap = plt.get_cmap('tab20')
+    for i, (b, grp) in enumerate(df.groupby('bead')):
+        grp_s = grp.sort_values('F_set_pN')
+        ax.plot(grp_s['F_set_pN'], grp_s['var_y_nm2'],
+                color=cmap(i), marker='o', ms=5, lw=1.2, alpha=0.8,
+                label=f'Bead {b}', zorder=3)
+    ax.set_xlabel('Expected force  [pN]')
+    ax.set_ylabel(r'$\langle y^2 \rangle$  [nm²]')
+    ax.set_yscale('log')
+    ax.set_title(f'y-variance vs force — $\\tau_{{sh}}$ = {tau_sh_label}')
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    out = str(PRACTICAL / f"{out_prefix}_var_y_{tau_sh_label.replace(' ','_')}.svg")
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f"  -> saved {out}")
+
+
+def plot_Fx_vs_z(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
+    """Measured force from x-variance (Fx_eq9) vs magnet height, with per-z mean."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    cmap = plt.get_cmap('tab20')
+    for i, (b, grp) in enumerate(df.groupby('bead')):
+        grp_s = grp.copy()
+        grp_s['z_mm'] = grp_s['F_set_pN'].apply(z_from_F)
+        grp_s = grp_s.sort_values('z_mm')
+        ax.plot(grp_s['z_mm'], grp_s['Fx_eq9'],
+                color=cmap(i), marker='o', ms=4, lw=1.0, alpha=0.7,
+                label=f'Bead {b}')
+    # Mean across beads per force step
+    means = df.groupby('F_set_pN')['Fx_eq9'].mean().reset_index()
+    means['z_mm'] = means['F_set_pN'].apply(z_from_F)
+    means = means.sort_values('z_mm')
+    ax.plot(means['z_mm'], means['Fx_eq9'], 'k-', lw=2.0, label='Mean', zorder=5)
+    ax.set_xlabel('Magnet height  $z$  [mm]')
+    ax.set_ylabel('$F_x$  [pN]')
+    ax.set_title(f'Force from x-variance vs magnet height — $\\tau_{{sh}}$ = {tau_sh_label}')
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    out = str(PRACTICAL / f"{out_prefix}_Fx_vs_z_{tau_sh_label.replace(' ','_')}.svg")
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f"  -> saved {out}")
+
+
+def plot_Fy_vs_z(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
+    """Measured force from y-variance (Fy_eq9) vs magnet height, with per-z mean."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    cmap = plt.get_cmap('tab20')
+    for i, (b, grp) in enumerate(df.groupby('bead')):
+        grp_s = grp.copy()
+        grp_s['z_mm'] = grp_s['F_set_pN'].apply(z_from_F)
+        grp_s = grp_s.sort_values('z_mm')
+        ax.plot(grp_s['z_mm'], grp_s['Fy_eq9'],
+                color=cmap(i), marker='o', ms=4, lw=1.0, alpha=0.7,
+                label=f'Bead {b}')
+    means = df.groupby('F_set_pN')['Fy_eq9'].mean().reset_index()
+    means['z_mm'] = means['F_set_pN'].apply(z_from_F)
+    means = means.sort_values('z_mm')
+    ax.plot(means['z_mm'], means['Fy_eq9'], 'k-', lw=2.0, label='Mean', zorder=5)
+    ax.set_xlabel('Magnet height  $z$  [mm]')
+    ax.set_ylabel('$F_y$  [pN]')
+    ax.set_title(f'Force from y-variance vs magnet height — $\\tau_{{sh}}$ = {tau_sh_label}')
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    out = str(PRACTICAL / f"{out_prefix}_Fy_vs_z_{tau_sh_label.replace(' ','_')}.svg")
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f"  -> saved {out}")
+
+
+def plot_F_ratio_vs_z(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
+    """F_par / F_set vs magnet height, with reference lines and per-axis means."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    df = df.copy()
+    df['z_mm']  = df['F_set_pN'].apply(z_from_F)
+    df['ratio_x'] = df['Fx_eq9'] / df['F_set_pN']
+    df['ratio_y'] = df['Fy_eq9'] / df['F_set_pN']
+
+    # Mean lines per axis
+    means = df.groupby('F_set_pN')[['ratio_x', 'ratio_y', 'z_mm']].mean().reset_index()
+    means = means.sort_values('z_mm')
+    ax.plot(means['z_mm'], means['ratio_x'], 'b-',  lw=2.0,
+            label='Mean $F_x$ / $F_{set}$  (short axis)', zorder=5)
+    ax.plot(means['z_mm'], means['ratio_y'], 'r-',  lw=2.0,
+            label='Mean $F_y$ / $F_{set}$  (long axis)',  zorder=5)
+
+    # Reference lines
+    z_range = [df['z_mm'].min() * 0.95, df['z_mm'].max() * 1.05]
+    ax.axhline(1.0, color='black', lw=1.2, ls='-',  label='$y = 1$  (exact)')
+    ax.axhline(1.1, color='black', lw=1.2, ls='--', label='$y = 1.1$  (10 % overestimation)')
+
+    ax.set_xlim(z_range)
+    ax.set_xlabel('Magnet height  $z$  [mm]')
+    ax.set_ylabel('$F_{meas}\ /\ F_{set}$')
+    ax.set_title(f'Force ratio vs magnet height — $\\tau_{{sh}}$ = {tau_sh_label}')
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    out = str(PRACTICAL / f"{out_prefix}_F_ratio_vs_z_{tau_sh_label.replace(' ','_')}.svg")
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f"  -> saved {out}")
+
+
+def plot_F_z_combined(dfs: dict, out_prefix: str = ''):
     """F_par vs magnet position z — fit + theory curve."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -455,12 +731,13 @@ def plot_F_z_combined(dfs: dict):
     ax.set_title('Force vs magnet position — fit vs theory')
     ax.legend(fontsize=8)
     plt.tight_layout()
-    plt.savefig('F_z_combined.pdf', bbox_inches='tight')
+    out = str(PRACTICAL / f"{out_prefix}_F_z_combined.svg")
+    plt.savefig(out, bbox_inches='tight')
     plt.show()
-    print("  -> saved F_z_combined.pdf")
+    print(f"  -> saved {out}")
 
 
-def plot_axis_identification(df: pd.DataFrame, tau_sh_label: str):
+def plot_axis_identification(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
     """
     Show Fx_eq8 and Fy_eq8 vs F_set on a log-log plot.
     The axis // B will systematically underestimate with Eq. 8
@@ -486,7 +763,7 @@ def plot_axis_identification(df: pd.DataFrame, tau_sh_label: str):
                  f'($\\parallel$ B axis gives lower Eq. 8 force; correct with Eq. 9)')
     ax.legend(fontsize=7, ncol=2)
     plt.tight_layout()
-    out = f"axis_id_{tau_sh_label.replace(' ','_')}.pdf"
+    out = str(PRACTICAL / f"{out_prefix}_axis_id_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
     print(f"  -> saved {out}")
@@ -559,7 +836,7 @@ def shutter_normalization(df_1ms: pd.DataFrame,
     ax.legend(fontsize=9)
     ax.set_ylim(0.9, None)
     plt.tight_layout()
-    plt.savefig('shutter_normalization.pdf', bbox_inches='tight')
+    plt.savefig(str(PRACTICAL / 'shutter_normalization.svg'), bbox_inches='tight')
     plt.show()
     print(f"\n  10 % crossing:  t_c,x/tau_sh = {u_10:.2f}")
     print(f"  -> tau_sh must be < t_c,x / {u_10:.2f}  for <10 % overestimation")
@@ -668,7 +945,8 @@ def plot_traces_overview(df_full: pd.DataFrame,
                          magnet_steps: list,
                          ref_idx: int,
                          beads_to_plot: list,
-                         settled_ms: dict = None):
+                         settled_ms: dict = None,
+                         out_prefix: str = ''):
     """
     x, y, z position traces over time for a selection of beads.
     Yellow bands mark each force-step window used in the analysis
@@ -707,51 +985,270 @@ def plot_traces_overview(df_full: pd.DataFrame,
     fig.legend(handles, labels, loc='upper right', fontsize=7, ncol=2)
     plt.tight_layout()
     bead_label = '_'.join(f'b{b}' for b in beads_to_plot)
-    out = f'traces_overview_{bead_label}.pdf'
+    out = str(PRACTICAL / f'{out_prefix}_traces_overview_{bead_label}.svg')
     plt.savefig(out, bbox_inches='tight')
     plt.show()
     print(f"  -> saved {out}")
 
 
 # ------------------------------------------------------------------------------
-# 8.  MAIN — fill in your file paths and run
+# 8.  THEORETICAL PLOTS  (Preparatory questions 1–4 from the PDF)
 # ------------------------------------------------------------------------------
 
-if __name__ == '__main__':
+# Force values used in preparatory questions (pN)
+_PREP_FORCES = np.array([0.1, 0.2, 0.3, 0.4, 0.8, 1.0, 3.0, 5.0, 6.0])
 
-    # -- Exp1 — TW_OB_TH/20260604/Exp1 ----------------------------------------
-    BASE          = Path('TW_OB_TH/20260604/Exp1/20260604_1602_exp1')
-    TRACES_FILE   = str(BASE / 'traces.txt')
-    MAG_SCRIPT    = str(BASE / 'magnet-script.txt')
 
-    N_TOTAL   = 19                           # beads 1–17 tethered, 18–19 reference
-    REF_IDX   = N_TOTAL                      # bead 19 = N2 (drift reference)
-    TETHERED  = list(range(1, N_TOTAL - 1))  # beads 1..17
-    FRAMERATE = 58.0                         # Hz (from config.yaml)
-    TAU_SH    = '0.4 ms'                     # shutter time (exposure in config)
-    # --------------------------------------------------------------------------
+def theo_plot_F_vs_Lext():
+    """
+    Preparatory Q1 — F(L_ext): WLC force vs extension (Eq. 12).
+    x-axis: L_ext [µm]  (log scale)
+    y-axis: Force [pN]
+    """
+    # Range: from L_ext at 0.01 pN up to L_ext at 100 pN (avoid divergence)
+    F_max_plot = 100.0
+    L_max_um   = wlc_L_ext(F_max_plot)
+    L_arr = np.linspace(wlc_L_ext(0.01), L_max_um, 800)  # µm
+    F_arr = np.array([wlc_force(l * 1e-6) for l in L_arr])
 
-    # -- Load the single continuous traces file --------------------------------
-    print("Loading traces.txt …")
-    df_full, _ = load_data(TRACES_FILE)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(L_arr, F_arr, 'b-', lw=2, label='WLC  (Eq. 12)')
 
-    # -- Parse magnet-script.txt -> [(duration_s, z_mm), …] --------------------
+    # Mark the preparatory-question force values
+    for F_pN in _PREP_FORCES:
+        L_um = wlc_L_ext(F_pN)
+        ax.scatter(L_um, F_pN, color='red', s=40, zorder=5)
+        ax.annotate(f'{F_pN} pN', (L_um, F_pN),
+                    textcoords='offset points', xytext=(5, 3), fontsize=7)
+
+    L_min_um = wlc_L_ext(0.05)   # just below the lowest force point
+    ax.set_xscale('log')
+    ax.set_xlim(L_min_um * 0.9, L_max_um * 1.01)
+    ax.set_ylim(0, 8)
+    ax.set_xlabel(r'$L_\mathrm{ext}$  [$\mu$m]')
+    ax.set_ylabel('Force  [pN]')
+    ax.set_title('WLC: Force vs Extension  (Eq. 12)')
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    out = str(THEORETICAL / 'theo_F_vs_Lext.svg')
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f'  -> saved {out}')
+
+
+def theo_plot_tcx_vs_F():
+    """
+    Preparatory Q2 — t_{c,x}(F): characteristic time vs force (Eq. 7).
+    x-axis: Force [pN]  (log scale)
+    y-axis: t_{c,x} [s]
+    Also marks 1/f_ac = 1/58 Hz reference line.
+    """
+    F_arr   = np.logspace(-1.5, 0.9, 400)  # pN
+    L_arr   = np.array([wlc_L_ext(f) for f in F_arr])
+    tcx_arr = np.array([t_cx(f, l) for f, l in zip(F_arr, L_arr)])
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(F_arr, tcx_arr, 'b-', lw=2, label=r'$t_{c,x} = \gamma L_\mathrm{ext}/F$  (Eq. 7)')
+    ax.axhline(1.0 / 58.0, color='red', ls='--', lw=1.5,
+               label=r'$1/f_{ac}$ = 1/58 Hz  ≈ 17 ms')
+
+    # Mark the preparatory-question force values
+    for F_pN in _PREP_FORCES:
+        L_um = wlc_L_ext(F_pN)
+        tc   = t_cx(F_pN, L_um)
+        ax.scatter(F_pN, tc, color='darkorange', s=40, zorder=5)
+
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel('Force  [pN]')
+    ax.set_ylabel(r'$t_{c,x}$  [s]')
+    ax.set_title(r'Characteristic time $t_{c,x}$ vs Force  (Eq. 7)')
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    out = str(THEORETICAL / 'theo_tcx_vs_F.svg')
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f'  -> saved {out}')
+
+
+def theo_plot_F_vs_magnet():
+    """
+    Preparatory Q4 — F(z): force vs magnet position (double-exponential calibration).
+    x-axis: magnet position z [mm]
+    y-axis: Force [pN]
+    Marks the positions corresponding to the nine preparatory forces.
+    """
+    z_arr = np.linspace(0.1, 13.0, 400)
+    F_arr = F_z(z_arr)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(z_arr, F_arr, 'b-', lw=2,
+            label=r'$F_z = 22.38\,e^{-1.458z} + 52.30\,e^{-0.691z}$')
+
+    for F_pN in _PREP_FORCES:
+        z_mm = z_from_F(F_pN)
+        ax.scatter(z_mm, F_pN, color='red', s=40, zorder=5)
+        ax.annotate(f'{F_pN} pN', (z_mm, F_pN),
+                    textcoords='offset points', xytext=(4, 2), fontsize=7)
+
+    ax.set_xlabel('Magnet position  $z$  [mm]')
+    ax.set_ylabel('Force  [pN]')
+    ax.set_title('Force vs Magnet Position  (Preparatory Q4)')
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    out = str(THEORETICAL / 'theo_F_vs_magnet.svg')
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f'  -> saved {out}')
+
+
+def theo_plot_varx_vs_F():
+    """
+    Preparatory Q3 — <x²>(F): theoretical x-variance vs force (Eq. 8).
+    x-axis: Force [pN]  (log scale)
+    y-axis: <x²> [nm²]
+    """
+    F_arr   = np.logspace(-1.5, 0.9, 400)
+    L_arr   = np.array([wlc_L_ext(f) for f in F_arr])
+    vx_arr  = np.array([var_x_theory(f, l) for f, l in zip(F_arr, L_arr)])
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(F_arr, vx_arr, 'b-', lw=2,
+            label=r'$\langle x^2\rangle = k_BT\,L_\mathrm{ext}/F$  (Eq. 8)')
+
+    for F_pN in _PREP_FORCES:
+        L_um = wlc_L_ext(F_pN)
+        ax.scatter(F_pN, var_x_theory(F_pN, L_um), color='red', s=40, zorder=5)
+
+    ax.set_xscale('log')
+    ax.set_xlabel('Force  [pN]')
+    ax.set_ylabel(r'$\langle x^2 \rangle$  [nm²]')
+    ax.set_title(r'Theoretical $\langle x^2\rangle$ vs Force  (Eq. 8)')
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    out = str(THEORETICAL / 'theo_varx_vs_F.svg')
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f'  -> saved {out}')
+
+
+def theo_plot_vary_vs_F():
+    """
+    Preparatory Q3 — <y²>(F): theoretical y-variance vs force (Eq. 9).
+    x-axis: Force [pN]  (log scale)
+    y-axis: <y²> [nm²]
+    """
+    F_arr   = np.logspace(-1.5, 0.9, 400)
+    L_arr   = np.array([wlc_L_ext(f) for f in F_arr])
+    vy_arr  = np.array([var_y_theory(f, l) for f, l in zip(F_arr, L_arr)])
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(F_arr, vy_arr, 'r-', lw=2,
+            label=r'$\langle y^2\rangle = k_BT\,(L_\mathrm{ext}+R)/F$  (Eq. 9)')
+
+    for F_pN in _PREP_FORCES:
+        L_um = wlc_L_ext(F_pN)
+        ax.scatter(F_pN, var_y_theory(F_pN, L_um), color='darkred', s=40, zorder=5)
+
+    ax.set_xscale('log')
+    ax.set_xlabel('Force  [pN]')
+    ax.set_ylabel(r'$\langle y^2 \rangle$  [nm²]')
+    ax.set_title(r'Theoretical $\langle y^2\rangle$ vs Force  (Eq. 9)')
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    out = str(THEORETICAL / 'theo_vary_vs_F.svg')
+    plt.savefig(out, bbox_inches='tight')
+    plt.show()
+    print(f'  -> saved {out}')
+
+
+def theo_table_F_vs_magnet():
+    """
+    Preparatory Q4 — table of Force (pN) vs magnet position (mm).
+    Saves as CSV and prints to console.
+    """
+    rows = []
+    for F_pN in _PREP_FORCES:
+        z_mm   = z_from_F(F_pN)
+        L_um   = wlc_L_ext(F_pN)
+        tc_s   = t_cx(F_pN, L_um)
+        vx_nm2 = var_x_theory(F_pN, L_um)
+        vy_nm2 = var_y_theory(F_pN, L_um)
+        rows.append(dict(
+            F_pN=F_pN,
+            z_mm=round(z_mm, 4),
+            L_ext_um=round(L_um, 3),
+            t_cx_s=round(tc_s, 4),
+            var_x_nm2=round(vx_nm2, 1),
+            var_y_nm2=round(vy_nm2, 1),
+        ))
+
+    df = pd.DataFrame(rows)
+    df.columns = ['Force (pN)', 'Magnet pos z (mm)', 'L_ext (µm)',
+                  't_c,x (s)', '<x²> (nm²)', '<y²> (nm²)']
+
+    print(f"\n{'='*72}")
+    print("  TABLE: Theoretical values vs Force  (Preparatory questions)")
+    print(f"{'='*72}")
+    print(df.to_string(index=False))
+    print(f"{'='*72}\n")
+
+    out_csv = str(THEORETICAL / 'theo_table_F_vs_magnet.csv')
+    df.to_csv(out_csv, index=False)
+    print(f'  -> saved {out_csv}')
+    return df
+
+
+def make_theoretical_plots():
+    """Generate and save all six theoretical plots to the 'theoretical/' folder."""
+    print(f"\n{'='*62}")
+    print("  THEORETICAL PLOTS  (Preparatory questions)")
+    print(f"{'='*62}")
+    theo_plot_F_vs_Lext()
+    theo_plot_tcx_vs_F()
+    theo_plot_F_vs_magnet()
+    theo_plot_varx_vs_F()
+    theo_plot_vary_vs_F()
+    theo_table_F_vs_magnet()
+
+
+# ------------------------------------------------------------------------------
+# 9.  MAIN — fill in your file paths and run
+# ------------------------------------------------------------------------------
+
+def run_experiment(base: Path, n_total: int, tau_sh: str,
+                   exclude_beads: list, trace_beads: list,
+                   out_prefix: str, fail_times: dict = None):
+    """Load, segment, and plot one experiment folder."""
+    ref_idx  = n_total
+    tethered = list(range(1, n_total - 1))
+
+    print(f"\n{'='*62}")
+    print(f"  {out_prefix}  |  tau_sh = {tau_sh}  |  {n_total} beads")
+    print(f"{'='*62}")
+
+    # Load traces
+    print("Loading traces.txt ...")
+    df_full, _ = load_data(str(base / 'traces.txt'))
+
+    # Parse magnet script
     magnet_steps = []
-    with open(MAG_SCRIPT) as fh:
+    with open(str(base / 'magnet-script.txt')) as fh:
         for line in fh:
             parts = line.strip().split()
-            if parts:
-                magnet_steps.append((float(parts[0]), float(parts[1])))
+            if len(parts) >= 2:
+                try:
+                    magnet_steps.append((float(parts[0]), float(parts[1])))
+                except ValueError:
+                    pass
 
-    # -- Parse magnet-history.txt -> settled time (ms) per step index ----------
-    MAG_HISTORY = str(BASE / 'magnet-history.txt')
-    mh = pd.read_csv(MAG_HISTORY, sep='\t', comment='#', header=None,
+    # Parse magnet history -> settled times
+    mh = pd.read_csv(str(base / 'magnet-history.txt'), sep='\t', comment='#',
+                     header=None,
                      names=['t', 'target_pos', 'target_speed',
                             'target_rot', 'rot_speed', 'actual_pos', 'actual_rot'])
-    SETTLE_TOL = 0.01   # mm — magnet considered settled within this of target
-
+    SETTLE_TOL = 0.01
     transition_rows = mh[mh['target_pos'] != mh['target_pos'].shift()].index.tolist()
-    # settled_ms[i] = time in ms when step i has settled (None if step 0)
     settled_ms = {}
     for step_i, row_idx in enumerate(transition_rows):
         target = mh.loc[row_idx, 'target_pos']
@@ -759,53 +1256,77 @@ if __name__ == '__main__':
         ok     = after[abs(after['actual_pos'] - target) < SETTLE_TOL]
         settled_ms[step_i] = ok.iloc[0]['t'] * 1000.0 if len(ok) else None
 
-    # -- Slice the continuous data into per-force-step segments ----------------
-    # Step 0: zero-force period (z far away -> negligible force)
-    # Step 1: stretch step (skip — used to extend DNA before calibration)
-    # Steps 2+: force steps used for calibration
+    # Slice into per-force segments
     t_ms = 0.0
-    zero_df = None
-    N_ZERO  = 0
-    seg_dict = {}   # {F_pN: DataFrame with zero-force rows prepended}
+    zero_df  = None
+    n_zero   = 0
+    seg_dict = {}
 
     for i, (dur_s, z_mm) in enumerate(magnet_steps):
         t_end_ms = t_ms + dur_s * 1000.0
-
         if i == 0:
-            mask  = (df_full['time_ms'] >= t_ms) & (df_full['time_ms'] < t_end_ms)
+            mask    = (df_full['time_ms'] >= t_ms) & (df_full['time_ms'] < t_end_ms)
             zero_df = df_full[mask].copy().reset_index(drop=True)
-            N_ZERO  = len(zero_df)
-            print(f"  Zero-force period: {dur_s:.0f} s -> {N_ZERO} frames  (z = {z_mm} mm)")
+            n_zero  = len(zero_df)
+            print(f"  Zero-force: {dur_s:.0f} s -> {n_zero} frames  (z = {z_mm} mm)")
         elif i == 1:
             print(f"  Stretch step skipped (z = {z_mm} mm)")
         else:
-            # Skip frames while magnet is still moving
             t_data_start = settled_ms.get(i, t_ms) or t_ms
             mask  = (df_full['time_ms'] >= t_data_start) & (df_full['time_ms'] < t_end_ms)
             chunk = df_full[mask].copy().reset_index(drop=True)
             F_pN  = round(F_z(z_mm), 3)
-            seg   = pd.concat([zero_df, chunk], ignore_index=True)
-            seg_dict[F_pN] = seg
-            skipped_s = (t_data_start - t_ms) / 1000.0
+            seg_dict[F_pN] = pd.concat([zero_df, chunk], ignore_index=True)
             print(f"  Force step {i-1:2d}: z = {z_mm:.2f} mm  ->  F ~ {F_pN:.3f} pN  "
-                  f"({len(chunk)} frames, skipped {skipped_s:.1f} s settling)")
-
+                  f"({len(chunk)} frames, skipped {(t_data_start-t_ms)/1000:.1f} s)")
         t_ms = t_end_ms
 
-    print(f"\n  N_ZERO = {N_ZERO}  |  force steps: {len(seg_dict)}")
+    print(f"\n  n_zero = {n_zero}  |  force steps: {len(seg_dict)}")
 
-    # -- Overview traces plot --------------------------------------------------
-    for _b in [1, 2, 9]:
-        plot_traces_overview(df_full, magnet_steps, REF_IDX, [_b], settled_ms)
+    # Overview traces
+    for b in trace_beads:
+        plot_traces_overview(df_full, magnet_steps, ref_idx, [b], settled_ms,
+                             out_prefix=out_prefix)
 
-    # -- Part 2: Force calibration ---------------------------------------------
-    print(f"\n=== PART 2: Force calibration (tau_sh = {TAU_SH}) ===")
-    df_cal = process_dataset(seg_dict, TETHERED, REF_IDX, N_ZERO, TAU_SH,
-                             exclude_beads=[9])
-    plot_F_Lext(df_cal, TAU_SH)
-    plot_axis_identification(df_cal, TAU_SH)
+    # Force calibration
+    print(f"\n=== Force calibration ({out_prefix}, tau_sh = {tau_sh}) ===")
+    df_cal = process_dataset(seg_dict, tethered, ref_idx, n_zero, tau_sh,
+                             exclude_beads=exclude_beads, fail_times=fail_times,
+                             out_prefix=out_prefix)
+    plot_F_Lext(df_cal, tau_sh, out_prefix=out_prefix)
+    plot_var_x_vs_F(df_cal, tau_sh, out_prefix=out_prefix)
+    plot_var_y_vs_F(df_cal, tau_sh, out_prefix=out_prefix)
+    plot_Fx_vs_z(df_cal, tau_sh, out_prefix=out_prefix)
+    plot_Fy_vs_z(df_cal, tau_sh, out_prefix=out_prefix)
+    plot_F_ratio_vs_z(df_cal, tau_sh, out_prefix=out_prefix)
+    plot_F_z_combined({tau_sh: df_cal}, out_prefix=out_prefix)
 
-    # F(z) plot for this dataset
-    plot_F_z_combined({TAU_SH: df_cal})
+    return df_cal
+
+
+if __name__ == '__main__':
+
+    make_theoretical_plots()
+
+    run_experiment(
+        base          = Path('TW_OB_TH/20260604/Exp1/20260604_1602_exp1'),
+        n_total       = 19,
+        tau_sh        = '0.4 ms',
+        exclude_beads = [9, 17],
+        trace_beads   = [1],
+        out_prefix    = 'exp1',
+        fail_times    = {
+            1:  2660,
+            2:  3090,
+            4:  2620,
+            6:  2920,
+            8:  3060,
+            10: 2560,
+            11: 2430,
+            12: 2660,
+            15: 2860,
+            16: 2860,
+        },
+    )
 
     print("\nAll done.")
