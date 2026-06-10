@@ -985,15 +985,19 @@ def plot_traces_overview(df_full: pd.DataFrame,
             drift_corr = (df_full[f'{coord}{b}'] - df_full[f'{coord}{ref_idx}']).values * 1e3
             ax.plot(t_s, drift_corr, lw=0.4, color=col, alpha=0.7, label=f'Bead {b}')
 
-    # Two yellow lines per force step: step start + settled time
+    # Two lines per step: orange = magnet starts moving, green = magnet settled
+    # Grey band marks the excluded (still-moving) interval
     t_cursor = 0.0
     for i, (dur_s, z_mm) in enumerate(magnet_steps):
         t_end = t_cursor + dur_s
-        if i >= 2:   # force steps only
-            t_settled = ((settled_ms or {}).get(i, t_cursor * 1000.0) or t_cursor * 1000.0) / 1000.0
-            for ax in axes:
-                ax.axvline(t_cursor,   color='yellow', lw=2, zorder=5)
-                ax.axvline(t_settled,  color='yellow', lw=2, zorder=5)
+        t_settled_ms = (settled_ms or {}).get(i)
+        t_settled = (t_settled_ms / 1000.0) if t_settled_ms is not None else t_cursor
+
+        for ax in axes:
+            ax.axvline(t_cursor,  color='orange',    lw=1.5, ls='--', zorder=5)
+            ax.axvline(t_settled, color='limegreen', lw=1.5, ls='--', zorder=5)
+            if t_settled > t_cursor + 0.01:
+                ax.axvspan(t_cursor, t_settled, color='gray', alpha=0.15, zorder=4)
         t_cursor = t_end
 
     for ax, ylabel in zip(axes, [r'$\Delta x$  [nm]', r'$\Delta y$  [nm]',
@@ -1002,14 +1006,14 @@ def plot_traces_overview(df_full: pd.DataFrame,
         ax.axhline(0, color='k', lw=0.4, ls='--')
 
     axes[2].set_xlabel('Time  [s]')
-    axes[0].set_title('Drift-corrected bead positions  (yellow lines = section boundaries)')
+    axes[0].set_title('Drift-corrected bead positions  '
+                      '(orange = magnet starts moving, green = settled; grey = excluded)')
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper right', fontsize=7, ncol=2)
     plt.tight_layout()
     bead_label = '_'.join(f'b{b}' for b in beads_to_plot)
     out = str(PRACTICAL / f'{out_prefix}_traces_overview_{bead_label}.svg')
     plt.savefig(out, bbox_inches='tight')
-    plt.show()
     plt.close()
     print(f"  -> saved {out}")
 
@@ -1055,7 +1059,6 @@ def theo_plot_F_vs_Lext():
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_F_vs_Lext.svg')
     plt.savefig(out, bbox_inches='tight')
-    plt.show()
     plt.close()
     print(f'  -> saved {out}')
 
@@ -1090,7 +1093,6 @@ def theo_plot_tcx_vs_F():
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_tcx_vs_F.svg')
     plt.savefig(out, bbox_inches='tight')
-    plt.show()
     plt.close()
     print(f'  -> saved {out}')
 
@@ -1122,7 +1124,6 @@ def theo_plot_F_vs_magnet():
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_F_vs_magnet.svg')
     plt.savefig(out, bbox_inches='tight')
-    plt.show()
     plt.close()
     print(f'  -> saved {out}')
 
@@ -1154,7 +1155,6 @@ def theo_plot_varx_vs_F():
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_varx_vs_F.svg')
     plt.savefig(out, bbox_inches='tight')
-    plt.show()
     plt.close()
     print(f'  -> saved {out}')
 
@@ -1186,7 +1186,6 @@ def theo_plot_vary_vs_F():
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_vary_vs_F.svg')
     plt.savefig(out, bbox_inches='tight')
-    plt.show()
     plt.close()
     print(f'  -> saved {out}')
 
@@ -1401,10 +1400,24 @@ def interactive_run():
 
     magnet_steps = _parse_magnet_script(base)
 
+    # Parse magnet history to get settled times (needed for 2-line markers)
+    mh = pd.read_csv(str(base / 'magnet-history.txt'), sep='\t', comment='#',
+                     header=None,
+                     names=['t', 'target_pos', 'target_speed',
+                            'target_rot', 'rot_speed', 'actual_pos', 'actual_rot'])
+    SETTLE_TOL = 0.01
+    transition_rows = mh[mh['target_pos'] != mh['target_pos'].shift()].index.tolist()
+    settled_ms = {}
+    for step_i, row_idx in enumerate(transition_rows):
+        target = mh.loc[row_idx, 'target_pos']
+        after  = mh.loc[row_idx:]
+        ok     = after[abs(after['actual_pos'] - target) < SETTLE_TOL]
+        settled_ms[step_i] = ok.iloc[0]['t'] * 1000.0 if len(ok) else None
+
     print(f"\nShowing traces for all {len(tethered)} tethered bead(s) — close each "
           f"plot window to continue...")
     for b in tethered:
-        plot_traces_overview(df_full, magnet_steps, ref_idx, [b],
+        plot_traces_overview(df_full, magnet_steps, ref_idx, [b], settled_ms,
                              out_prefix=out_prefix)
 
     # ------------------------------------------------------------------
