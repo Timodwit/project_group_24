@@ -7,6 +7,7 @@ Dependencies:  numpy, scipy, pandas, matplotlib
 Install:       pip install numpy scipy pandas matplotlib
 """
 
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,10 +16,10 @@ from pathlib import Path
 
 plt.rcParams.update({'font.size': 10, 'figure.dpi': 120})
 
-PRACTICAL   = Path("practical")
-THEORETICAL = Path("theoretical")
-PRACTICAL.mkdir(exist_ok=True)
-THEORETICAL.mkdir(exist_ok=True)
+PRACTICAL   = Path(__file__).parent.parent / "plots" / "practical"
+THEORETICAL = Path(__file__).parent.parent / "plots" / "theoretical"
+PRACTICAL.mkdir(parents=True, exist_ok=True)
+THEORETICAL.mkdir(parents=True, exist_ok=True)
 
 # ------------------------------------------------------------------------------
 # 0.  PHYSICAL CONSTANTS
@@ -248,6 +249,7 @@ def part1_tracking_resolution(file_200gl: str, file_20gl: str):
         out = str(PRACTICAL / f"tracking_{label.replace(' ', '_')}.svg")
         plt.savefig(out, bbox_inches='tight')
         plt.show()
+        plt.close()
         print(f"  -> saved {out}")
 
     return results
@@ -545,6 +547,7 @@ def plot_F_Lext(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
     out = str(PRACTICAL / f"{out_prefix}_F_Lext_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -566,6 +569,7 @@ def plot_var_x_vs_F(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
     out = str(PRACTICAL / f"{out_prefix}_var_x_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -587,6 +591,7 @@ def plot_var_y_vs_F(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
     out = str(PRACTICAL / f"{out_prefix}_var_y_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -614,6 +619,7 @@ def plot_Fx_vs_z(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
     out = str(PRACTICAL / f"{out_prefix}_Fx_vs_z_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -640,40 +646,52 @@ def plot_Fy_vs_z(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
     out = str(PRACTICAL / f"{out_prefix}_Fy_vs_z_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
 def plot_F_ratio_vs_z(df: pd.DataFrame, tau_sh_label: str, out_prefix: str = ''):
-    """F_par / F_set vs magnet height, with reference lines and per-axis means."""
+    """F_par / F_set vs magnet height, with reference lines, per-axis means and std bands."""
     fig, ax = plt.subplots(figsize=(7, 5))
 
     df = df.copy()
-    df['z_mm']  = df['F_set_pN'].apply(z_from_F)
+    df['z_mm']    = df['F_set_pN'].apply(z_from_F)
     df['ratio_x'] = df['Fx_eq9'] / df['F_set_pN']
     df['ratio_y'] = df['Fy_eq9'] / df['F_set_pN']
 
-    # Mean lines per axis
-    means = df.groupby('F_set_pN')[['ratio_x', 'ratio_y', 'z_mm']].mean().reset_index()
-    means = means.sort_values('z_mm')
-    ax.plot(means['z_mm'], means['ratio_x'], 'b-',  lw=2.0,
-            label='Mean $F_x$ / $F_{set}$  (short axis)', zorder=5)
-    ax.plot(means['z_mm'], means['ratio_y'], 'r-',  lw=2.0,
-            label='Mean $F_y$ / $F_{set}$  (long axis)',  zorder=5)
+    # Mean ± std per force step
+    stats = (df.groupby('F_set_pN')[['ratio_x', 'ratio_y', 'z_mm']]
+               .agg(['mean', 'std'])
+               .reset_index())
+    stats.columns = ['F_set', 'rx_mean', 'rx_std', 'ry_mean', 'ry_std', 'z_mean', 'z_std']
+    stats = stats.sort_values('z_mean')
+
+    z = stats['z_mean'].values
+
+    # x-axis (short)
+    ax.errorbar(z, stats['rx_mean'], yerr=stats['rx_std'],
+                fmt='b-o', lw=2.0, ms=5, capsize=4, elinewidth=1.5, capthick=1.5,
+                label='Mean $F_x/F_{set}$ ± SD  (short axis)', zorder=5)
+
+    # y-axis (long)
+    ax.errorbar(z, stats['ry_mean'], yerr=stats['ry_std'],
+                fmt='r-o', lw=2.0, ms=5, capsize=4, elinewidth=1.5, capthick=1.5,
+                label='Mean $F_y/F_{set}$ ± SD  (long axis)', zorder=5)
 
     # Reference lines
-    z_range = [df['z_mm'].min() * 0.95, df['z_mm'].max() * 1.05]
     ax.axhline(1.0, color='black', lw=1.2, ls='-',  label='$y = 1$  (exact)')
-    ax.axhline(1.1, color='black', lw=1.2, ls='--', label='$y = 1.1$  (10 % overestimation)')
+    ax.axhline(1.1, color='black', lw=1.2, ls='--', label='10 % overestimation')
 
-    ax.set_xlim(z_range)
-    ax.set_xlabel('Magnet height  $z$  [mm]')
-    ax.set_ylabel('$F_{meas}\ /\ F_{set}$')
+    ax.set_xscale('log')
+    ax.set_xlabel('Magnet height  $z$  [mm]  (log scale)')
+    ax.set_ylabel('$F_\\mathrm{meas}\ /\ F_\\mathrm{set}$')
     ax.set_title(f'Force ratio vs magnet height — $\\tau_{{sh}}$ = {tau_sh_label}')
     ax.legend(fontsize=8)
     plt.tight_layout()
     out = str(PRACTICAL / f"{out_prefix}_F_ratio_vs_z_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -726,14 +744,16 @@ def plot_F_z_combined(dfs: dict, out_prefix: str = ''):
         except RuntimeError as e:
             print(f"  Fit failed for {tau_label}: {e}")
 
+    ax.set_yscale('log')
     ax.set_xlabel('Magnet position  $z$  [mm]')
-    ax.set_ylabel('Force  [pN]')
+    ax.set_ylabel('Force  [pN]  (log scale)')
     ax.set_title('Force vs magnet position — fit vs theory')
     ax.legend(fontsize=8)
     plt.tight_layout()
     out = str(PRACTICAL / f"{out_prefix}_F_z_combined.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -766,6 +786,7 @@ def plot_axis_identification(df: pd.DataFrame, tau_sh_label: str, out_prefix: st
     out = str(PRACTICAL / f"{out_prefix}_axis_id_{tau_sh_label.replace(' ','_')}.svg")
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -838,6 +859,7 @@ def shutter_normalization(df_1ms: pd.DataFrame,
     plt.tight_layout()
     plt.savefig(str(PRACTICAL / 'shutter_normalization.svg'), bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"\n  10 % crossing:  t_c,x/tau_sh = {u_10:.2f}")
     print(f"  -> tau_sh must be < t_c,x / {u_10:.2f}  for <10 % overestimation")
     return u_10
@@ -988,6 +1010,7 @@ def plot_traces_overview(df_full: pd.DataFrame,
     out = str(PRACTICAL / f'{out_prefix}_traces_overview_{bead_label}.svg')
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f"  -> saved {out}")
 
 
@@ -1033,6 +1056,7 @@ def theo_plot_F_vs_Lext():
     out = str(THEORETICAL / 'theo_F_vs_Lext.svg')
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f'  -> saved {out}')
 
 
@@ -1058,16 +1082,16 @@ def theo_plot_tcx_vs_F():
         tc   = t_cx(F_pN, L_um)
         ax.scatter(F_pN, tc, color='darkorange', s=40, zorder=5)
 
-    ax.set_xscale('log')
     ax.set_yscale('log')
     ax.set_xlabel('Force  [pN]')
-    ax.set_ylabel(r'$t_{c,x}$  [s]')
+    ax.set_ylabel(r'$t_{c,x}$  [s]  (log scale)')
     ax.set_title(r'Characteristic time $t_{c,x}$ vs Force  (Eq. 7)')
     ax.legend(fontsize=9)
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_tcx_vs_F.svg')
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f'  -> saved {out}')
 
 
@@ -1099,6 +1123,7 @@ def theo_plot_F_vs_magnet():
     out = str(THEORETICAL / 'theo_F_vs_magnet.svg')
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f'  -> saved {out}')
 
 
@@ -1121,14 +1146,16 @@ def theo_plot_varx_vs_F():
         ax.scatter(F_pN, var_x_theory(F_pN, L_um), color='red', s=40, zorder=5)
 
     ax.set_xscale('log')
-    ax.set_xlabel('Force  [pN]')
-    ax.set_ylabel(r'$\langle x^2 \rangle$  [nm²]')
+    ax.set_yscale('log')
+    ax.set_xlabel('Force  [pN]  (log scale)')
+    ax.set_ylabel(r'$\langle x^2 \rangle$  [nm²]  (log scale)')
     ax.set_title(r'Theoretical $\langle x^2\rangle$ vs Force  (Eq. 8)')
     ax.legend(fontsize=9)
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_varx_vs_F.svg')
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f'  -> saved {out}')
 
 
@@ -1151,14 +1178,16 @@ def theo_plot_vary_vs_F():
         ax.scatter(F_pN, var_y_theory(F_pN, L_um), color='darkred', s=40, zorder=5)
 
     ax.set_xscale('log')
-    ax.set_xlabel('Force  [pN]')
-    ax.set_ylabel(r'$\langle y^2 \rangle$  [nm²]')
+    ax.set_yscale('log')
+    ax.set_xlabel('Force  [pN]  (log scale)')
+    ax.set_ylabel(r'$\langle y^2 \rangle$  [nm²]  (log scale)')
     ax.set_title(r'Theoretical $\langle y^2\rangle$ vs Force  (Eq. 9)')
     ax.legend(fontsize=9)
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_vary_vs_F.svg')
     plt.savefig(out, bbox_inches='tight')
     plt.show()
+    plt.close()
     print(f'  -> saved {out}')
 
 
@@ -1225,6 +1254,7 @@ def run_experiment(base: Path, n_total: int, tau_sh: str,
 
     print(f"\n{'='*62}")
     print(f"  {out_prefix}  |  tau_sh = {tau_sh}  |  {n_total} beads")
+    print(f"  Saving plots to: {PRACTICAL.resolve()}")
     print(f"{'='*62}")
 
     # Load traces
@@ -1304,29 +1334,128 @@ def run_experiment(base: Path, n_total: int, tau_sh: str,
     return df_cal
 
 
-if __name__ == '__main__':
+def _parse_magnet_script(base: Path):
+    """Return list of (duration_s, z_mm) from magnet-script.txt."""
+    steps = []
+    with open(str(base / 'magnet-script.txt')) as fh:
+        for line in fh:
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                try:
+                    steps.append((float(parts[0]), float(parts[1])))
+                except ValueError:
+                    pass
+    return steps
 
+
+def interactive_run():
+    """Fully interactive experiment runner."""
+    import sys
+
+    # ------------------------------------------------------------------
+    # Step 0: theoretical plots (always generated first)
+    # ------------------------------------------------------------------
     make_theoretical_plots()
 
+    # ------------------------------------------------------------------
+    # Step 1: experiment folder
+    # ------------------------------------------------------------------
+    exp_name = input("\nWhat is your experiment map called: ").strip()
+    base = Path(exp_name)
+    if not base.exists():
+        print(f"ERROR: folder '{base}' not found.")
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Step 2: auto-detect number of beads from traces.txt
+    # ------------------------------------------------------------------
+    traces_path = base / 'traces.txt'
+    df_full, n_total = load_data(str(traces_path))
+    ref_idx  = n_total          # last bead is reference (N2 used for drift)
+    tethered = list(range(1, n_total - 1))
+    print(f"  Detected {n_total} beads total → "
+          f"tethered: {tethered},  reference: {n_total - 1} & {n_total}")
+
+    # ------------------------------------------------------------------
+    # Step 3: auto-detect shutter time from frame interval in traces.txt
+    # ------------------------------------------------------------------
+    dt_ms   = float(np.median(np.diff(df_full['time_ms'].values)))
+    f_ac_hz = 1000.0 / dt_ms                        # acquisition frequency [Hz]
+    tau_default_ms = round(dt_ms, 4)                 # tau_sh = 1/f_ac (zero dead time)
+    tau_default_label = (f"{int(tau_default_ms)} ms"
+                         if tau_default_ms == int(tau_default_ms)
+                         else f"{tau_default_ms} ms")
+    print(f"  Detected frame interval: {dt_ms:.3f} ms  →  "
+          f"f_ac ≈ {f_ac_hz:.1f} Hz  →  tau_sh = {tau_default_label}")
+    override = input(f"  Shutter time tau_sh [{tau_default_label}] "
+                     f"(press Enter to accept, or type a value): ").strip()
+    tau_sh = override if override else tau_default_label
+
+    # ------------------------------------------------------------------
+    # Step 4: set output folder = experiment name, show traces for ALL beads
+    # ------------------------------------------------------------------
+    global PRACTICAL
+    PRACTICAL = Path("practical") / base.name
+    PRACTICAL.mkdir(parents=True, exist_ok=True)
+    out_prefix = base.name          # just the last folder segment, e.g. '20260604_1602_exp1'
+
+    magnet_steps = _parse_magnet_script(base)
+
+    print(f"\nShowing traces for all {len(tethered)} tethered bead(s) — close each "
+          f"plot window to continue...")
+    for b in tethered:
+        plot_traces_overview(df_full, magnet_steps, ref_idx, [b],
+                             out_prefix=out_prefix)
+
+    # ------------------------------------------------------------------
+    # Step 5: excluded beads
+    # ------------------------------------------------------------------
+    excl_raw = input(
+        "\nWhich beads should be excluded? "
+        "(comma-separated numbers, e.g. '3,7' — press Enter for none): "
+    ).strip()
+    exclude_beads = (
+        [int(x.strip()) for x in excl_raw.split(',') if x.strip()]
+        if excl_raw else []
+    )
+    if exclude_beads:
+        print(f"  Excluding beads: {exclude_beads}")
+
+    # ------------------------------------------------------------------
+    # Step 6: fail times per bead
+    # ------------------------------------------------------------------
+    active_beads = [b for b in tethered if b not in exclude_beads]
+    print("\nEnter the fail time in ms for each bead "
+          "(the time in the experiment at which the DNA tether breaks).")
+    print("Enter 0 or leave blank if the bead has no fail time.")
+    fail_times = {}
+    for b in active_beads:
+        val = input(f"  Bead {b} fail time [ms] (0 = none): ").strip()
+        try:
+            t = float(val)
+            if t > 0:
+                fail_times[b] = t
+        except ValueError:
+            pass   # blank or non-numeric → no fail time
+
+    if fail_times:
+        print(f"  Fail times set: {fail_times}")
+
+    # ------------------------------------------------------------------
+    # Step 7: run analysis — traces already shown, skip inside run_experiment
+    # ------------------------------------------------------------------
     run_experiment(
-        base          = Path('TW_OB_TH/20260604/Exp1/20260604_1602_exp1'),
-        n_total       = 19,
-        tau_sh        = '0.4 ms',
-        exclude_beads = [9, 17],
-        trace_beads   = [1],
-        out_prefix    = 'exp1',
-        fail_times    = {
-            1:  2660,
-            2:  3090,
-            4:  2620,
-            6:  2920,
-            8:  3060,
-            10: 2560,
-            11: 2430,
-            12: 2660,
-            15: 2860,
-            16: 2860,
-        },
+        base          = base,
+        n_total       = n_total,
+        tau_sh        = tau_sh,
+        exclude_beads = exclude_beads,
+        trace_beads   = [],     # already shown above
+        out_prefix    = out_prefix,
+        fail_times    = fail_times,
     )
 
     print("\nAll done.")
+
+
+if __name__ == '__main__':
+    interactive_run()
