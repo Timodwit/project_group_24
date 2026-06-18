@@ -972,37 +972,30 @@ def plot_traces_overview(df_full: pd.DataFrame,
 # ------------------------------------------------------------------------------
 
 # Force values used in preparatory questions (pN)
-_PREP_FORCES = np.array([0.1, 0.2, 0.3, 0.4, 0.8, 1.0, 3.0, 5.0, 6.0])
+_PREP_FORCES = np.array([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0])
 
 
 def theo_plot_F_vs_Lext():
     """
-    Preparatory Q1 — F(L_ext): WLC force vs extension (Eq. 12).
-    x-axis: L_ext [µm]  (log scale)
-    y-axis: Force [pN]
+    Preparatory Q1 — L_ext(F): WLC extension vs force (Eq. 12).
+    x-axis: Force [pN]  (log scale)
+    y-axis: L_ext [µm]
     """
-    # Range: from L_ext at 0.01 pN up to L_ext at 100 pN (avoid divergence)
-    F_max_plot = 100.0
-    L_max_um   = wlc_L_ext(F_max_plot)
-    L_arr = np.linspace(wlc_L_ext(0.01), L_max_um, 800)  # µm
-    F_arr = np.array([wlc_force(l * 1e-6) for l in L_arr])
+    F_arr = np.logspace(-1.5, 1.7, 600)   # pN, ~0.03 to ~50 pN
+    L_arr = np.array([wlc_L_ext(f) for f in F_arr])
 
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(L_arr, F_arr, 'b-', lw=2, label='WLC  (Eq. 12)')
+    ax.plot(F_arr, L_arr, 'b-', lw=2, label='WLC  (Eq. 12)')
 
     # Mark the preparatory-question force values
     for F_pN in _PREP_FORCES:
         L_um = wlc_L_ext(F_pN)
-        ax.scatter(L_um, F_pN, color='red', s=40, zorder=5)
-        ax.annotate(f'{F_pN} pN', (L_um, F_pN),
+        ax.scatter(F_pN, L_um, color='red', s=40, zorder=5)
+        ax.annotate(f'{F_pN} pN', (F_pN, L_um),
                     textcoords='offset points', xytext=(5, 3), fontsize=7)
 
-    L_min_um = wlc_L_ext(0.05)   # just below the lowest force point
-    ax.set_xscale('log')
-    ax.set_xlim(L_min_um * 0.9, L_max_um * 1.01)
-    ax.set_ylim(0, 8)
-    ax.set_xlabel(r'$L_\mathrm{ext}$  [$\mu$m]', fontweight='bold')
-    ax.set_ylabel('Force  [pN]', fontweight='bold')
+    ax.set_xlabel('Force  [pN]', fontweight='bold')
+    ax.set_ylabel(r'$L_\mathrm{ext}$  [$\mu$m]', fontweight='bold')
     ax.legend(fontsize=9)
     plt.tight_layout()
     out = str(THEORETICAL / 'theo_F_vs_Lext.svg')
@@ -1018,7 +1011,7 @@ def theo_plot_tcx_vs_F():
     y-axis: t_{c,x} [s]
     Also marks 1/f_ac = 1/58 Hz reference line.
     """
-    F_arr   = np.logspace(-1.5, 0.9, 400)  # pN
+    F_arr   = np.logspace(-1.5, 1.7, 400)  # pN, ~0.03 to ~50 pN
     L_arr   = np.array([wlc_L_ext(f) for f in F_arr])
     tcx_arr = np.array([t_cx(f, l) for f, l in zip(F_arr, L_arr)])
 
@@ -1080,7 +1073,7 @@ def theo_plot_varx_vs_F():
     x-axis: Force [pN]  (log scale)
     y-axis: <x²> [nm²]
     """
-    F_arr   = np.logspace(-1.5, 0.9, 400)
+    F_arr   = np.logspace(-1.5, 1.7, 400)  # pN, ~0.03 to ~50 pN
     L_arr   = np.array([wlc_L_ext(f) for f in F_arr])
     vx_arr  = np.array([var_x_theory(f, l) for f, l in zip(F_arr, L_arr)])
 
@@ -1110,7 +1103,7 @@ def theo_plot_vary_vs_F():
     x-axis: Force [pN]  (log scale)
     y-axis: <y²> [nm²]
     """
-    F_arr   = np.logspace(-1.5, 0.9, 400)
+    F_arr   = np.logspace(-1.5, 1.7, 400)  # pN, ~0.03 to ~50 pN
     L_arr   = np.array([wlc_L_ext(f) for f in F_arr])
     vy_arr  = np.array([var_y_theory(f, l) for f, l in zip(F_arr, L_arr)])
 
@@ -1288,6 +1281,8 @@ def _segment_experiment(base: Path, df_full: pd.DataFrame):
 def interactive_run():
     """Fully interactive experiment runner with optional combining of multiple folders."""
     import sys
+
+    make_theoretical_plots()
 
     # ------------------------------------------------------------------
     # Step 1: hoeveel mappen?
